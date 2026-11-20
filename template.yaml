@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: S3 to SQS to Lambda processing sample
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+Resources:
+  UploadQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 180
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: UploadQueuePolicy
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-uploads-${AWS::AccountId}'
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            Queue: !GetAtt UploadQueue.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: incoming/
+  UploadQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref UploadQueue]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: s3.amazonaws.com}
+            Action: sqs:SendMessage
+            Resource: !GetAtt UploadQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:s3:::${AWS::StackName}-uploads-${AWS::AccountId}'
+  ProcessedBucket:
+    Type: AWS::S3::Bucket
+  MetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: objectKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: objectKey
+          KeyType: HASH
+  FileProcessor:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handler.process_event
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref MetadataTable
+          OUTPUT_BUCKET: !Ref ProcessedBucket
+      Policies:
+        - S3ReadPolicy: {BucketName: !Ref UploadBucket}
+        - S3WritePolicy: {BucketName: !Ref ProcessedBucket}
+        - DynamoDBWritePolicy: {TableName: !Ref MetadataTable}
+      Events:
+        QueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt UploadQueue.Arn
+            BatchSize: 5
+Outputs:
+  UploadBucketName: {Value: !Ref UploadBucket}
+  ProcessedBucketName: {Value: !Ref ProcessedBucket}
+  MetadataTableName: {Value: !Ref MetadataTable}
